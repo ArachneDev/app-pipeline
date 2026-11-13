@@ -1,0 +1,23 @@
+# The image `make check` and CI run the tests in. Base by digest, Python
+# packages by hash, gitleaks by sha256. Keep the gitleaks pin equal to the
+# one in .github/workflows/build.yml.
+FROM docker.io/library/python:3.12.16-alpine3.24@sha256:a61cbd76a882645de7f91423329fe43a67eed60d7da24f9e5331414bb3618b20
+
+# bash runs the workflow steps under test. If a build fails with "unable to
+# select packages", bump to the version `apk policy bash` shows.
+RUN apk add --no-cache bash=5.3.9-r1 git=2.54.1-r0 \
+ && git config --system --add safe.directory '*'
+
+ENV PYTHONDONTWRITEBYTECODE=1 PIP_DISABLE_PIP_VERSION_CHECK=1
+
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir --root-user-action=ignore --require-hashes -r /tmp/requirements.txt \
+ && rm /tmp/requirements.txt
+
+ARG GITLEAKS_VERSION=8.30.1
+ARG GITLEAKS_SHA256=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+RUN cd /tmp \
+ && wget -q "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" -O gitleaks.tar.gz \
+ && echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c - \
+ && tar -xzf gitleaks.tar.gz -C /usr/local/bin gitleaks \
+ && rm gitleaks.tar.gz
