@@ -277,7 +277,8 @@ jobs:
             elif grep -qiE 'permission denied|operation not permitted|EACCES|EPERM' <<< "$logs"; then
               problem "the app hit a permission error (see the log above). Contract: runs as a non-root user with no capabilities. Fix: listen on a port above 1024, don't chown or switch users at start, and make files the app reads readable by the image's USER."
             elif [ "$status" = running ]; then
-              listening="$("$engine" run --rm --network "container:$name" "$probe" netstat -ltn 2>/dev/null | awk '$NF == "LISTEN" {print $4}')"
+              # 127.0.0.11 is Docker's embedded DNS on user networks, not the app.
+              listening="$("$engine" run --rm --network "container:$name" "$probe" netstat -ltn 2>/dev/null | awk '$NF == "LISTEN" {print $4}' | grep -v '^127\.0\.0\.11:' || true)"
               ports="$(sed 's/.*://' <<< "$listening" | sort -un | paste -sd, -)"
               if [ -z "$ports" ]; then
                 problem "nothing listened on any port within ${timeout}s. Contract: listens on the port given in PORT, default 3000. Fix: start the server on PORT; if start-up is slow, make it faster or report it to the platform owner."
