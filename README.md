@@ -27,7 +27,7 @@ jobs:
 | Build-args check | A `build-args` name looks secret (`TOKEN`, `PASSWORD`, `KEY`...) or gitleaks finds a secret-shaped value |
 | gitleaks on every commit reachable from the build | A secret was ever committed there. A `.gitleaks.toml`, `.gitleaksignore` or `gitleaks:allow` in the app repo is ignored |
 | `docker build` of the `Containerfile` | The build fails. `VERSION` is passed as a build argument, set to the tag |
-| Contract test: runs the image read-only, with no capabilities, `no-new-privileges`, a memory limit, exec tmpfs on `/tmp`, `/var/tmp` and `/run`, `PORT=18080`, `.env.example` as env and a sample `/run/secrets/app.json` | The image runs as root, `.env.example` or a README section (Port, Volumes, Dependencies, Memory) is missing, or `health-path` doesn't answer 2xx with the version within 60 s. Each error names the contract line and the fix |
+| Contract test: runs the image read-only, with no capabilities, `no-new-privileges`, a memory limit, exec tmpfs on `/tmp`, `/var/tmp` and `/run`, `PORT=18080`, `.env.example` as env and a sample `/run/secrets/app.json` | The image's `USER` is not a numeric UID above 0 (a name can map to root), `.env.example` or a README section (Port, Volumes, Dependencies, Memory) is missing, or `health-path` doesn't answer 2xx with the exact version within 60 s. Each error names the contract line and the fix |
 | Trivy image scan | A critical CVE with a fix available is not listed in `.trivyignore` |
 | Push to ghcr.io with `GITHUB_TOKEN` | Only on a version tag `vX.Y.Z` (or `vX.Y.Z-pre`); any other tag fails. Outputs `image` and `digest` |
 
@@ -44,6 +44,6 @@ All optional. Most apps pass none.
 | `trivy-ignore` | `.trivyignore` | One CVE ID per line, each with a comment saying why it is accepted |
 | `app-json` | Empty: `{}` | Sample `/run/secrets/app.json` for the contract test, inside the context. Fake values only |
 | `health-path` | `/healthz` | Path that must answer 2xx with the build version |
-| `memory` | `512m` | Memory limit for the contract test: the measured peak plus 25 to 50 percent |
+| `memory` | `512m` | Memory limit for the contract test: the measured peak plus 25 to 50 percent. A number above 0 with a unit: `k`, `m` or `g` |
 
 What an image must provide is the container contract in the infra blueprint: <https://github.com/ArachneDev/infra/blob/main/docs/blueprint.md#container-contract>.

@@ -200,9 +200,16 @@ jobs:
           if [[ ! "$HEALTH_PATH" =~ ^/[A-Za-z0-9._~/-]*$ ]]; then
             echo "::error::health-path must be a path such as /healthz."; exit 1
           fi
-          if [[ ! "$MEMORY" =~ ^[0-9]+[kmg]?$ ]]; then
-            echo "::error::memory must be a size such as 512m."; exit 1
+          # A unit is required and 0 is refused: Docker and Podman read 0 as no limit, a bare number as bytes.
+          if [[ ! "$MEMORY" =~ ^[1-9][0-9]*[kmg]$ ]]; then
+            echo "::error::memory must be a size such as 512m or 1g."; exit 1
           fi
+          # Never print the value: a caller may have pasted the secrets instead of a path.
+          if [ -n "$APP_JSON" ] && [ ! -f "$CONTEXT/$APP_JSON" ]; then
+            echo "::error::app-json does not name a file in $CONTEXT (the value is not printed). Fix: commit a sample with fake values there and give its path, or leave app-json empty."; exit 1
+          fi
+          mapfile -t flags < <(printf '%s\n' "$RUN_FLAGS" | sed '/^[[:space:]]*$/d')
+          [ "${#flags[@]}" -gt 0 ] || { echo "::error::RUN_FLAGS is empty: the contract test would run without hardening."; exit 1; }
 
           # Files the app repo must have, next to its Containerfile.
           if [ ! -f "$CONTEXT/.env.example" ]; then
@@ -212,8 +219,9 @@ jobs:
             problem "README.md is missing in $CONTEXT. Contract: the README states the port, volumes, external dependencies and measured memory peak. Fix: add README.md with a heading for each."
           else
             missing=()
-            for pair in "Port:port" "Volumes:volume|persist" "Dependencies:depend" "Memory:memory"; do
-              grep -qiE "^#+ .*(${pair#*:})" "$CONTEXT/README.md" || missing+=("${pair%%:*}")
+            # Whole words only: "Support" or "report-bot" is not a Port section.
+            for pair in "Port:ports?" "Volumes:volumes?|persist[a-z]*" "Dependencies:dependenc(y|ies)|depends?" "Memory:memory"; do
+              grep -qiE "^#+ (.*[^[:alnum:]])?(${pair#*:})([^[:alnum:]]|$)" "$CONTEXT/README.md" || missing+=("${pair%%:*}")
             done
             if [ "${#missing[@]}" -gt 0 ]; then
               list="$(IFS=,; echo "${missing[*]}")"
@@ -222,27 +230,23 @@ jobs:
           fi
 
           # The image's own user: production adds UserNS=auto, but root inside is still refused.
+          # Only a numeric UID above 0 passes: "00", or a name that /etc/passwd maps to 0, is root too.
           user="$("$engine" image inspect -f '{{.Config.User}}' "$IMAGE")"
-          case "${user%%:*}" in
-            ""|0|root) problem "the image runs as root (USER is '${user:-unset}'). Contract: runs as a non-root user inside the container. Fix: add a numeric USER such as 'USER 10001:10001' at the end of the Containerfile, and chown only what the app must write." ;;
-          esac
+          if [[ ! "${user%%:*}" =~ ^[1-9][0-9]*$ ]]; then
+            problem "the image may run as root: USER is '${user:-unset}', not a numeric UID above 0. Contract: runs as a non-root user inside the container. Fix: add a numeric USER such as 'USER 10001:10001' at the end of the Containerfile (a name can map to UID 0), and chown only what the app must write."
+          fi
 
-          tmp="$(mktemp -d)"
+          name="contract-$$-$RANDOM" net="contract-$$-$RANDOM" tmp="$(mktemp -d)"
+          trap '"$engine" rm -f "$name" >/dev/null 2>&1; "$engine" network rm "$net" >/dev/null 2>&1; rm -rf "$tmp"' EXIT
           if [ -z "$APP_JSON" ]; then
             echo '{}' > "$tmp/app.json"
-          elif [ -f "$CONTEXT/$APP_JSON" ]; then
-            cp "$CONTEXT/$APP_JSON" "$tmp/app.json"
           else
-            echo "::error::app-json names $APP_JSON, which is not in $CONTEXT. Fix: commit a sample with fake values there, or leave app-json empty."; exit 1
+            cp "$CONTEXT/$APP_JSON" "$tmp/app.json"
           fi
           chmod 0444 "$tmp/app.json"
           envfile=()
           [ -f "$CONTEXT/.env.example" ] && envfile=(--env-file "$CONTEXT/.env.example")
-          mapfile -t flags < <(printf '%s\n' "$RUN_FLAGS" | sed '/^[[:space:]]*$/d')
-          [ "${#flags[@]}" -gt 0 ] || { echo "::error::RUN_FLAGS is empty: the contract test would run without hardening."; exit 1; }
 
-          name="contract-$$-$RANDOM" net="contract-$$-$RANDOM"
-          trap '"$engine" rm -f "$name" >/dev/null 2>&1; "$engine" network rm "$net" >/dev/null 2>&1; rm -rf "$tmp"' EXIT
           "$engine" pull -q "$probe" >/dev/null
           "$engine" network create "$net" >/dev/null
           echo "Running $IMAGE with ${flags[*]} --memory=$MEMORY, PORT=$port and /run/secrets/app.json"
@@ -262,7 +266,8 @@ jobs:
           done
 
           if [ "$ok" = 1 ]; then
-            if ! grep -qF -- "$VERSION" <<< "$body"; then
+            # A whole token: v1.2.30 or v1.2.3-rc1 is not v1.2.3.
+            if ! grep -oE '[[:alnum:]._+-]+' <<< "$body" | grep -qxF -- "$VERSION"; then
               problem "GET $HEALTH_PATH answered but did not include the build version $VERSION. Contract: a health endpoint such as /healthz that returns the build version. Fix: return the VERSION build argument in the body, for example 'ARG VERSION' then 'ENV VERSION=\$VERSION' in the Containerfile."
             fi
           else

@@ -30,9 +30,9 @@ def build(context):
     return tag
 
 
-def run_contract(image, context=SAMPLE, app_json=""):
+def run_contract(image, context=SAMPLE, app_json="", version=VERSION):
     env = {
-        "ENGINE": ENGINE, "IMAGE": image, "VERSION": VERSION, "CONTEXT": str(context),
+        "ENGINE": ENGINE, "IMAGE": image, "VERSION": version, "CONTEXT": str(context),
         "APP_JSON": app_json, "HEALTH_PATH": "/healthz", "MEMORY": "512m", "HEALTH_TIMEOUT": "20",
     }
     if ENGINE == "podman":
@@ -50,6 +50,40 @@ class RunFlags(unittest.TestCase):
         for path in ["/tmp", "/var/tmp", "/run"]:
             # Podman's read-only tmpfs is exec; Docker's default is noexec.
             self.assertIn(f"--tmpfs={path}:rw,exec,nosuid,nodev", flags)
+
+
+class Inputs(unittest.TestCase):
+    # Runs in `make check`: bad inputs are refused before any engine call.
+    def check(self, **inputs):
+        env = {"IMAGE": "unused", "VERSION": VERSION, "CONTEXT": str(SAMPLE), "APP_JSON": "",
+               "HEALTH_PATH": "/healthz", "MEMORY": "512m", "ENGINE": "false"} | inputs
+        result = run_step("contract", env, cwd=ROOT)
+        return result.returncode, result.stdout + result.stderr
+
+    def test_memory_without_a_limit_is_refused(self):
+        # 0 means no limit to Docker and Podman; a bare number means bytes.
+        for memory in ("0", "00", "0m", "512"):
+            code, out = self.check(MEMORY=memory)
+            self.assertNotEqual(code, 0, memory)
+            self.assertIn("memory must be a size such as 512m", out)
+
+    def test_app_json_value_is_never_printed(self):
+        # A caller who pastes the secrets themselves instead of a path must not see them in the log.
+        code, out = self.check(APP_JSON='{"TOKEN": "canary-4f2e"}')
+        self.assertNotEqual(code, 0)
+        self.assertIn("app-json does not name a file", out)
+        self.assertNotIn("canary-4f2e", out)
+
+    def test_named_secrets_sample_that_is_missing_fails(self):
+        code, out = self.check(APP_JSON="nope.json")
+        self.assertNotEqual(code, 0)
+        self.assertIn("app-json does not name a file", out)
+        self.assertIn("Fix:", out)
+
+    def test_empty_hardening_flags_are_refused(self):
+        code, out = self.check(RUN_FLAGS="\n")
+        self.assertNotEqual(code, 0)
+        self.assertIn("RUN_FLAGS is empty", out)
 
 
 @unittest.skipUnless(ENGINE, "needs ENGINE=docker or ENGINE=podman; run `make contract-test`")
@@ -87,9 +121,20 @@ class ContractTest(unittest.TestCase):
             self.assert_fails_with(run_contract(self.images["reads-secrets"], context=Path(context)),
                                    "exited with code 3", "GREETING missing")
 
+    def test_health_body_with_a_longer_version_fails(self):
+        # The sample answers v0.0.0-contract: that is not the build version v0.0.0.
+        self.assert_fails_with(run_contract(self.images["sample"], version="v0.0.0"),
+                               "did not include the build version v0.0.0")
+
     def test_root_image_fails(self):
         self.assert_fails_with(run_contract(self.images["root"]),
-                               "runs as root", "Contract: runs as a non-root user", "Fix: add a numeric USER")
+                               "may run as root", "Contract: runs as a non-root user", "Fix: add a numeric USER")
+
+    def test_root_by_another_spelling_fails(self):
+        # USER 00 is UID 0; so is a name that the image's /etc/passwd maps to 0.
+        for image in ("root-padded", "root-by-name"):
+            self.assert_fails_with(run_contract(self.images[image]),
+                                   "Contract: runs as a non-root user", "Fix: add a numeric USER")
 
     def test_filesystem_writing_image_fails(self):
         self.assert_fails_with(run_contract(self.images["writes-fs"]),
@@ -110,9 +155,15 @@ class ContractTest(unittest.TestCase):
             self.assertIn(section, out)
         self.assertNotIn("Port,", out)
 
-    def test_named_secrets_sample_that_is_missing_fails(self):
-        self.assert_fails_with(run_contract(self.images["sample"], app_json="nope.json"),
-                               "app-json names nope.json", "Fix:")
+    def test_readme_section_names_match_whole_words(self):
+        # "report-bot", "Support" and "Independent" contain port and depend but aren't those sections.
+        with tempfile.TemporaryDirectory() as context:
+            shutil.copy(SAMPLE / ".env.example", context)
+            Path(context, "README.md").write_text(
+                "# report-bot\n\n## Support\n\n## Volumes\n\n## Independent of others\n\n## Memory\n")
+            self.assert_fails_with(run_contract(self.images["sample"], context=Path(context)),
+                                   "README.md has no section for: Port, Dependencies.")
+
 
 
 if __name__ == "__main__":
