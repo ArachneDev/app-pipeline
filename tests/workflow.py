@@ -24,9 +24,13 @@ def step(step_id):
 
 
 def run_step(step_id, env, cwd=None):
+    s = step(step_id)
+    # The step's own literal env (such as RUN_FLAGS) applies as in Actions;
+    # values that are expressions come from the test.
+    fixed = {k: str(v) for k, v in s.get("env", {}).items() if "${{" not in str(v)}
     return subprocess.run(
-        ["bash", "-euo", "pipefail", "-c", step(step_id)["run"]],
-        env={"PATH": PATH, **env},
+        ["bash", "-euo", "pipefail", "-c", s["run"]],
+        env={"PATH": PATH, **fixed, **env},
         cwd=cwd,
         capture_output=True,
         text=True,

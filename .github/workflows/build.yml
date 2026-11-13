@@ -1,5 +1,6 @@
 # The shared build: gitleaks on the repo, a build-args check, build the
-# Containerfile, Trivy scan, and on a tag push ghcr.io/<owner>/<app>:<tag>.
+# Containerfile, the contract test, Trivy scan, and on a tag push
+# ghcr.io/<owner>/<app>:<tag>.
 # Apps call it from a short CI file; see README.md. Changing it: AGENTS.md.
 name: build
 
@@ -26,6 +27,18 @@ on:
         description: Trivy ignore file, relative to the repo root. One CVE ID per line, with a comment saying why.
         type: string
         default: .trivyignore
+      app-json:
+        description: Sample /run/secrets/app.json for the contract test, relative to the context. Fake values only; it is committed. Default an empty object.
+        type: string
+        default: ""
+      health-path:
+        description: The path the contract test and uptime checks call. It must answer 2xx with the build version.
+        type: string
+        default: /healthz
+      memory:
+        description: Memory limit for the contract test, as in production (--memory). Set it to the app's measured peak plus 25 to 50 percent.
+        type: string
+        default: 512m
     outputs:
       image:
         description: The image reference built, ghcr.io/<owner>/<app>:<version>.
@@ -151,6 +164,147 @@ jobs:
             --label "org.opencontainers.image.source=$SOURCE" \
             --label "org.opencontainers.image.version=$VERSION" \
             -f "$CONTEXT/$CONTAINERFILE" -t "$IMAGE" "$CONTEXT"
+
+      # Runs the image under production hardening. Tested by tests/test_contract.py,
+      # which runs this exact script. RUN_FLAGS is the one list of hardening flags:
+      # it must match infra's app.container template (UserNS=auto has no Docker
+      # equivalent, so the image's own non-root USER is checked instead).
+      - name: Run the image under production hardening (container contract)
+        id: contract
+        env:
+          IMAGE: ${{ steps.vars.outputs.image }}
+          VERSION: ${{ steps.vars.outputs.version }}
+          CONTEXT: ${{ inputs.context }}
+          APP_JSON: ${{ inputs.app-json }}
+          HEALTH_PATH: ${{ inputs.health-path }}
+          MEMORY: ${{ inputs.memory }}
+          RUN_FLAGS: |
+            --read-only
+            --tmpfs=/tmp:rw,exec,nosuid,nodev
+            --tmpfs=/var/tmp:rw,exec,nosuid,nodev
+            --tmpfs=/run:rw,exec,nosuid,nodev
+            --cap-drop=all
+            --security-opt=no-new-privileges
+            --pids-limit=2048
+        run: |
+          engine="${ENGINE:-docker}"
+          timeout="${HEALTH_TIMEOUT:-60}"
+          # Not 3000, so an app that ignores PORT fails here, not in production.
+          port=18080
+          probe=docker.io/library/busybox:1.37.0-musl@sha256:5624bb6777cf469b1fb50ae3f981b15d2715ee2fffaf20b9998cfb7843726835
+          contract="https://github.com/ArachneDev/infra/blob/main/docs/blueprint.md#container-contract"
+          fail=0
+          problem() { echo "::error title=Container contract::$1"; fail=1; }
+          hardening="Contract: runs under hardened defaults: read-only root, no capabilities, no-new-privileges, a memory limit."
+
+          if [[ ! "$HEALTH_PATH" =~ ^/[A-Za-z0-9._~/-]*$ ]]; then
+            echo "::error::health-path must be a path such as /healthz."; exit 1
+          fi
+          # A unit is required and 0 is refused: Docker and Podman read 0 as no limit, a bare number as bytes.
+          if [[ ! "$MEMORY" =~ ^[1-9][0-9]*[kmg]$ ]]; then
+            echo "::error::memory must be a size such as 512m or 1g."; exit 1
+          fi
+          # Never print the value: a caller may have pasted the secrets instead of a path.
+          if [ -n "$APP_JSON" ] && [ ! -f "$CONTEXT/$APP_JSON" ]; then
+            echo "::error::app-json does not name a file in $CONTEXT (the value is not printed). Fix: commit a sample with fake values there and give its path, or leave app-json empty."; exit 1
+          fi
+          mapfile -t flags < <(printf '%s\n' "$RUN_FLAGS" | sed '/^[[:space:]]*$/d')
+          [ "${#flags[@]}" -gt 0 ] || { echo "::error::RUN_FLAGS is empty: the contract test would run without hardening."; exit 1; }
+
+          # Files the app repo must have, next to its Containerfile.
+          if [ ! -f "$CONTEXT/.env.example" ]; then
+            problem ".env.example is missing in $CONTEXT. Contract: the app lists every variable it reads, with a one-line description each, in .env.example. Fix: add .env.example with a '# description' line and a VAR=example line per variable; leave it empty if the app reads none."
+          fi
+          if [ ! -f "$CONTEXT/README.md" ]; then
+            problem "README.md is missing in $CONTEXT. Contract: the README states the port, volumes, external dependencies and measured memory peak. Fix: add README.md with a heading for each."
+          else
+            missing=()
+            # Whole words only: "Support" or "report-bot" is not a Port section.
+            for pair in "Port:ports?" "Volumes:volumes?|persist[a-z]*" "Dependencies:dependenc(y|ies)|depends?" "Memory:memory"; do
+              grep -qiE "^#+ (.*[^[:alnum:]])?(${pair#*:})([^[:alnum:]]|$)" "$CONTEXT/README.md" || missing+=("${pair%%:*}")
+            done
+            if [ "${#missing[@]}" -gt 0 ]; then
+              list="$(IFS=,; echo "${missing[*]}")"
+              problem "README.md has no section for: ${list//,/, }. Contract: the README states the port, volumes, external dependencies and measured memory peak. Fix: add a heading for each, such as '## ${missing[0]}'. Write 'None' where nothing applies."
+            fi
+          fi
+
+          # The image's own user: production adds UserNS=auto, but root inside is still refused.
+          # Only a numeric UID above 0 passes: "00", or a name that /etc/passwd maps to 0, is root too.
+          user="$("$engine" image inspect -f '{{.Config.User}}' "$IMAGE")"
+          if [[ ! "${user%%:*}" =~ ^[1-9][0-9]*$ ]]; then
+            problem "the image may run as root: USER is '${user:-unset}', not a numeric UID above 0. Contract: runs as a non-root user inside the container. Fix: add a numeric USER such as 'USER 10001:10001' at the end of the Containerfile (a name can map to UID 0), and chown only what the app must write."
+          fi
+
+          name="contract-$$-$RANDOM" net="contract-$$-$RANDOM" tmp="$(mktemp -d)"
+          trap '"$engine" rm -f "$name" >/dev/null 2>&1; "$engine" network rm "$net" >/dev/null 2>&1; rm -rf "$tmp"' EXIT
+          if [ -z "$APP_JSON" ]; then
+            echo '{}' > "$tmp/app.json"
+          else
+            cp "$CONTEXT/$APP_JSON" "$tmp/app.json"
+          fi
+          chmod 0444 "$tmp/app.json"
+          envfile=()
+          [ -f "$CONTEXT/.env.example" ] && envfile=(--env-file "$CONTEXT/.env.example")
+
+          "$engine" pull -q "$probe" >/dev/null
+          "$engine" network create "$net" >/dev/null
+          echo "Running $IMAGE with ${flags[*]} --memory=$MEMORY, PORT=$port and /run/secrets/app.json"
+          if ! "$engine" run -d --name "$name" --network "$net" --network-alias app "${flags[@]}" --memory="$MEMORY" \
+              "${envfile[@]}" -e "PORT=$port" -e "PUBLIC_URL=https://app.example.com" \
+              -v "$tmp/app.json:/run/secrets/app.json:ro,z" "$IMAGE" >/dev/null; then
+            problem "the container did not start. $hardening Fix: see the error above."; exit 1
+          fi
+
+          # Production reaches the app over its network, never on loopback.
+          url="http://app:$port$HEALTH_PATH" ok=0 body=""
+          deadline=$((SECONDS + timeout))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            [ "$("$engine" inspect -f '{{.State.Status}}' "$name")" = running ] || break
+            if body="$("$engine" run --rm --network "$net" "$probe" wget -q -T 3 -O - "$url" 2>/dev/null)"; then ok=1; break; fi
+            sleep 2
+          done
+
+          if [ "$ok" = 1 ]; then
+            # A whole token: v1.2.30 or v1.2.3-rc1 is not v1.2.3.
+            if ! grep -oE '[[:alnum:]._+-]+' <<< "$body" | grep -qxF -- "$VERSION"; then
+              problem "GET $HEALTH_PATH answered but did not include the build version $VERSION. Contract: a health endpoint such as /healthz that returns the build version. Fix: return the VERSION build argument in the body, for example 'ARG VERSION' then 'ENV VERSION=\$VERSION' in the Containerfile."
+            fi
+          else
+            state="$("$engine" inspect -f '{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}}' "$name")"
+            logs="$("$engine" logs --tail 40 "$name" 2>&1 || true)"
+            echo "::group::Last 40 log lines"; printf '%s\n' "$logs"; echo "::endgroup::"
+            read -r status code oom <<< "$state"
+            if grep -qiE 'read-only file system|EROFS' <<< "$logs"; then
+              problem "the app wrote to the read-only root filesystem. $hardening Fix: write temporary files under /tmp, and list paths that must persist in the README so the stack mounts them as volumes."
+            elif [ "$oom" = true ]; then
+              problem "the app ran out of memory under --memory=$MEMORY. $hardening Fix: lower the app's memory use, or set the memory input to the measured peak plus 25 to 50 percent."
+            elif grep -qiE 'permission denied|operation not permitted|EACCES|EPERM' <<< "$logs"; then
+              problem "the app hit a permission error (see the log above). Contract: runs as a non-root user with no capabilities. Fix: listen on a port above 1024, don't chown or switch users at start, and make files the app reads readable by the image's USER."
+            elif [ "$status" = running ]; then
+              # 127.0.0.11 is Docker's embedded DNS on user networks, not the app.
+              listening="$("$engine" run --rm --network "container:$name" "$probe" netstat -ltn 2>/dev/null | awk '$NF == "LISTEN" {print $4}' | grep -v '^127\.0\.0\.11:' || true)"
+              ports="$(sed 's/.*://' <<< "$listening" | sort -un | paste -sd, -)"
+              if [ -z "$ports" ]; then
+                problem "nothing listened on any port within ${timeout}s. Contract: listens on the port given in PORT, default 3000. Fix: start the server on PORT; if start-up is slow, make it faster or report it to the platform owner."
+              elif ! grep -qE "[:.]$port\$" <<< "$listening"; then
+                problem "the app listens on port ${ports//,/, }, not on PORT=$port. Contract: listens on the port given in PORT, default 3000. Fix: read the port from the PORT environment variable instead of hardcoding it."
+              elif ! grep -qvE "^(127\.|::1:|::ffff:127\.)" <<< "$(grep -E "[:.]$port\$" <<< "$listening")"; then
+                problem "the app listens on PORT only on loopback, so nothing outside the container reaches it. Contract: listens on the port given in PORT. Fix: listen on 0.0.0.0 (all interfaces), not 127.0.0.1 or localhost."
+              else
+                problem "GET $HEALTH_PATH on PORT=$port did not answer 2xx within ${timeout}s. Contract: a health endpoint such as /healthz that returns the build version. Fix: serve $HEALTH_PATH with status 200, or set the health-path input."
+              fi
+            else
+              problem "the container exited with code $code before $HEALTH_PATH answered (see the log above). $hardening The app also reads its secrets from /run/secrets/app.json. Fix: make it start under these flags; to test with secrets, commit a fake-values sample and name it in the app-json input."
+            fi
+          fi
+
+          if [ "$fail" = 0 ]; then
+            echo "$IMAGE meets the container contract: $contract"
+          else
+            echo "The container contract: $contract"
+          fi
+          exit "$fail"
 
       - name: Fail on critical CVEs that have a fix
         env:

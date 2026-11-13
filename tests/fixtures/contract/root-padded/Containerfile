@@ -1,0 +1,6 @@
+# Breaks the contract on purpose: USER 00 is UID 0, spelled so a check for "0" misses it. tests/test_contract.py only.
+FROM docker.io/library/busybox:1.37.0-musl@sha256:5624bb6777cf469b1fb50ae3f981b15d2715ee2fffaf20b9998cfb7843726835
+ARG VERSION=dev
+RUN mkdir /www && printf '%s\n' "$VERSION" > /www/healthz
+USER 00:00
+CMD ["sh", "-c", "exec httpd -f -p \"$PORT\" -h /www"]

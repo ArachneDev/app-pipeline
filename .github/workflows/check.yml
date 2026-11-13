@@ -1,4 +1,5 @@
-# Runs `make check`: the pin check, the tests and gitleaks, in the check image.
+# Runs `make check` (the pin check, the tests and gitleaks, in the check image)
+# and `make contract-test` (the contract test against real images, with docker).
 name: check
 on:
   pull_request:
@@ -12,3 +13,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: {fetch-depth: 0, persist-credentials: false}
       - run: make check ENGINE=docker
+  contract-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {persist-credentials: false}
+      - name: Install PyYAML by hash
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -q --require-hashes -r tools/check-image/requirements.txt
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+      - run: make contract-test ENGINE=docker
