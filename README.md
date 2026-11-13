@@ -1,6 +1,6 @@
 # app-pipeline
 
-The shared CI workflow every ArachneDev app calls. A version tag builds the app's `Containerfile`, scans it and pushes `ghcr.io/arachnedev/<app>:<tag>`.
+The shared CI workflow every ArachneDev app calls. A version tag builds the app's `Containerfile`, runs it under production hardening, scans it and pushes `ghcr.io/arachnedev/<app>:<tag>`.
 
 ## Use it
 
@@ -27,6 +27,7 @@ jobs:
 | Build-args check | A `build-args` name looks secret (`TOKEN`, `PASSWORD`, `KEY`...) or gitleaks finds a secret-shaped value |
 | gitleaks on every commit reachable from the build | A secret was ever committed there. A `.gitleaks.toml`, `.gitleaksignore` or `gitleaks:allow` in the app repo is ignored |
 | `docker build` of the `Containerfile` | The build fails. `VERSION` is passed as a build argument, set to the tag |
+| Contract test: runs the image read-only, with no capabilities, `no-new-privileges`, a memory limit, tmpfs on `/tmp`, `/var/tmp` and `/run`, `PORT=18080`, `.env.example` as env and a sample `/run/secrets/app.json` | The image runs as root, `.env.example` or a README section (Port, Volumes, Dependencies, Memory) is missing, or `health-path` doesn't answer 2xx with the version within 60 s. Each error names the contract line and the fix |
 | Trivy image scan | A critical CVE with a fix available is not listed in `.trivyignore` |
 | Push to ghcr.io with `GITHUB_TOKEN` | Only on a version tag `vX.Y.Z` (or `vX.Y.Z-pre`); any other tag fails. Outputs `image` and `digest` |
 
@@ -41,5 +42,8 @@ All optional. Most apps pass none.
 | `containerfile` | `Containerfile` | Path inside the context |
 | `build-args` | Empty | One `KEY=VALUE` per line. Never secrets: the app reads those at run time |
 | `trivy-ignore` | `.trivyignore` | One CVE ID per line, each with a comment saying why it is accepted |
+| `app-json` | Empty: `{}` | Sample `/run/secrets/app.json` for the contract test, inside the context. Fake values only |
+| `health-path` | `/healthz` | Path that must answer 2xx with the build version |
+| `memory` | `512m` | Memory limit for the contract test: the measured peak plus 25 to 50 percent |
 
 What an image must provide is the container contract in the infra blueprint: <https://github.com/ArachneDev/infra/blob/main/docs/blueprint.md#container-contract>.

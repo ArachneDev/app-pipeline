@@ -4,10 +4,11 @@ This repo is the reusable workflow every app calls, so a change here reaches eve
 
 | Path | What it is |
 |---|---|
-| `.github/workflows/build.yml` | The shared workflow apps call: build, scan, publish |
+| `.github/workflows/build.yml` | The shared workflow apps call: build, contract test, scan, publish. Its `contract` step's `RUN_FLAGS` is the one list of production hardening flags |
 | `.github/workflows/pipeline-sample.yml` | The sample caller. It runs `build.yml` from this commit on every PR |
 | `sample/` | `pipeline-sample`, a test image only. Never deployed |
 | `tests/`, `tools/checks/` | What `make check` runs |
+| `tests/fixtures/contract/` | Images that break the contract on purpose, for `make contract-test` |
 
 ## Versioning
 
@@ -31,8 +32,9 @@ Adding an optional input, fixing a bug, or bumping a pinned tool is not breaking
 ## Test a change
 
 1. Run `make check`. It runs the pin check, the tests and gitleaks in a pinned image. Check: it ends with `OK` and `no leaks found`.
-2. Open a PR. The `pipeline-sample` job runs the changed `build.yml` end to end, without pushing.
-3. A new rule gets a test in `tests/` that goes red on a planted violation.
+2. If you touched the `contract` step, run `make contract-test` (needs Podman or Docker). Check: it ends with `OK` and no skips.
+3. Open a PR. The `pipeline-sample` job runs the changed `build.yml` end to end, without pushing.
+4. A new rule gets a test in `tests/` that goes red on a planted violation.
 
 Every `uses:` is pinned by full commit SHA; `tools/checks/pins.py` enforces it. Downloaded tools are pinned by version and sha256. Keep the gitleaks pin in `build.yml` and `tools/check-image/Containerfile` equal.
 
