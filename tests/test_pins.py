@@ -30,6 +30,15 @@ class PinCheck(unittest.TestCase):
         digest = "sha256:" + "a" * 64
         self.assertEqual(pins.violations(f"  - uses: docker://alpine@{digest}\n"), [])
 
+    def test_flow_style_is_checked(self):
+        for text in [
+            "jobs:\n  b:\n    steps:\n      - {uses: actions/checkout@v7, with: {fetch-depth: 0}}\n",
+            "jobs:\n  b:\n    steps: [{uses: some/action@main}]\n",
+            "jobs: {b: {uses: some/repo/.github/workflows/x.yml@v1}}\n",
+        ]:
+            with self.subTest(text=text):
+                self.assertEqual(len(pins.violations(text)), 1)
+
     def test_this_repo_passes(self):
         self.assertEqual(pins.repo_violations(ROOT), [])
 

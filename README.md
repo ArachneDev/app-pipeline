@@ -25,10 +25,10 @@ jobs:
 | Step | Fails when |
 |---|---|
 | Build-args check | A `build-args` name looks secret (`TOKEN`, `PASSWORD`, `KEY`...) or gitleaks finds a secret-shaped value |
-| gitleaks on the full git history | A secret was ever committed |
+| gitleaks on every commit reachable from the build | A secret was ever committed there. A `.gitleaks.toml`, `.gitleaksignore` or `gitleaks:allow` in the app repo is ignored |
 | `docker build` of the `Containerfile` | The build fails. `VERSION` is passed as a build argument, set to the tag |
 | Trivy image scan | A critical CVE with a fix available is not listed in `.trivyignore` |
-| Push to ghcr.io with `GITHUB_TOKEN` | Only on a tag. Outputs `image` and `digest` |
+| Push to ghcr.io with `GITHUB_TOKEN` | Only on a version tag `vX.Y.Z` (or `vX.Y.Z-pre`); any other tag fails. Outputs `image` and `digest` |
 
 ## Inputs
 

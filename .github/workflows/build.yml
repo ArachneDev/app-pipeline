@@ -79,7 +79,16 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           app="${APP:-$REPO_NAME}"
-          if [ "$REF_TYPE" = tag ]; then version="$REF_NAME" publish=true; else version="sha-${SHA:0:12}" publish=false; fi
+          if [ "$REF_TYPE" = tag ]; then
+            # Only vX.Y.Z (optionally -prerelease) publishes. Tags such as prod and
+            # staging are moved by the release flow and must never be pushed here.
+            if [[ ! "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::tag ${REF_NAME:0:60} is not a version such as v1.4.0. Only version tags publish."; exit 1
+            fi
+            version="$REF_NAME" publish=true
+          else
+            version="sha-${SHA:0:12}" publish=false
+          fi
           image="ghcr.io/${OWNER,,}/${app,,}:${version}"
           echo "Image: $image (publish: $publish)"
           { echo "image=$image"; echo "version=$version"; echo "publish=$publish"; } >> "$GITHUB_OUTPUT"
@@ -90,6 +99,10 @@ jobs:
         env:
           BUILD_ARGS: ${{ inputs.build-args }}
         run: |
+          # Our config only: a .gitleaks.toml, .gitleaksignore or gitleaks:allow
+          # comment in the caller's repo must not silence a finding.
+          gl="$(mktemp -d)" && mkdir "$gl/no-ignore"
+          printf '[extend]\nuseDefault = true\n' > "$gl/config.toml"
           fail=0
           while IFS= read -r line || [ -n "$line" ]; do
             [ -z "${line//[[:space:]]/}" ] && continue
@@ -102,13 +115,23 @@ jobs:
               echo "::error::build-args name $name looks secret. Pass secrets at run time, never at build time."; fail=1
             fi
           done <<< "$BUILD_ARGS"
-          if [ -n "$BUILD_ARGS" ] && ! printf '%s\n' "$BUILD_ARGS" | gitleaks stdin --no-banner --redact --log-level error; then
+          if [ -n "$BUILD_ARGS" ] && ! printf '%s\n' "$BUILD_ARGS" | gitleaks stdin --no-banner --redact --log-level error \
+              --config "$gl/config.toml" --gitleaks-ignore-path "$gl/no-ignore" --ignore-gitleaks-allow; then
             echo "::error::gitleaks found a secret-shaped value in build-args."; fail=1
           fi
           exit "$fail"
 
       - name: Scan the repo history for secrets
-        run: gitleaks git --no-banner --redact .
+        id: history
+        # Every commit reachable from HEAD (what is built), not other branches.
+        # Our config only, as in the build-args step. gitleaks always reads a
+        # .gitleaksignore at the root it scans, so scan the git dir, not the tree.
+        run: |
+          gl="$(mktemp -d)" && mkdir "$gl/no-ignore"
+          printf '[extend]\nuseDefault = true\n' > "$gl/config.toml"
+          gitleaks git --no-banner --redact --log-opts="--full-history HEAD" \
+            --config "$gl/config.toml" --gitleaks-ignore-path "$gl/no-ignore" --ignore-gitleaks-allow \
+            "$(git rev-parse --absolute-git-dir)"
 
       - name: Build the image
         env:
