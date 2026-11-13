@@ -180,9 +180,9 @@ jobs:
           MEMORY: ${{ inputs.memory }}
           RUN_FLAGS: |
             --read-only
-            --tmpfs=/tmp
-            --tmpfs=/var/tmp
-            --tmpfs=/run
+            --tmpfs=/tmp:rw,exec,nosuid,nodev
+            --tmpfs=/var/tmp:rw,exec,nosuid,nodev
+            --tmpfs=/run:rw,exec,nosuid,nodev
             --cap-drop=all
             --security-opt=no-new-privileges
             --pids-limit=2048

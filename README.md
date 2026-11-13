@@ -27,7 +27,7 @@ jobs:
 | Build-args check | A `build-args` name looks secret (`TOKEN`, `PASSWORD`, `KEY`...) or gitleaks finds a secret-shaped value |
 | gitleaks on every commit reachable from the build | A secret was ever committed there. A `.gitleaks.toml`, `.gitleaksignore` or `gitleaks:allow` in the app repo is ignored |
 | `docker build` of the `Containerfile` | The build fails. `VERSION` is passed as a build argument, set to the tag |
-| Contract test: runs the image read-only, with no capabilities, `no-new-privileges`, a memory limit, tmpfs on `/tmp`, `/var/tmp` and `/run`, `PORT=18080`, `.env.example` as env and a sample `/run/secrets/app.json` | The image runs as root, `.env.example` or a README section (Port, Volumes, Dependencies, Memory) is missing, or `health-path` doesn't answer 2xx with the version within 60 s. Each error names the contract line and the fix |
+| Contract test: runs the image read-only, with no capabilities, `no-new-privileges`, a memory limit, exec tmpfs on `/tmp`, `/var/tmp` and `/run`, `PORT=18080`, `.env.example` as env and a sample `/run/secrets/app.json` | The image runs as root, `.env.example` or a README section (Port, Volumes, Dependencies, Memory) is missing, or `health-path` doesn't answer 2xx with the version within 60 s. Each error names the contract line and the fix |
 | Trivy image scan | A critical CVE with a fix available is not listed in `.trivyignore` |
 | Push to ghcr.io with `GITHUB_TOKEN` | Only on a version tag `vX.Y.Z` (or `vX.Y.Z-pre`); any other tag fails. Outputs `image` and `digest` |
 

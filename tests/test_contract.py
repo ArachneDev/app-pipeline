@@ -7,12 +7,13 @@ skips it; `make contract-test` and CI's `contract-test` job run it.
 
 import os
 import secrets
+import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
-from workflow import ROOT, run_step
+from workflow import ROOT, run_step, step
 
 ENGINE = os.environ.get("ENGINE", "")
 FIXTURES = ROOT / "tests" / "fixtures" / "contract"
@@ -40,6 +41,17 @@ def run_contract(image, context=SAMPLE, app_json=""):
     return run_step("contract", env, cwd=ROOT)
 
 
+class RunFlags(unittest.TestCase):
+    # Runs in `make check`. Each flag is a contract line; dropping one needs an infra change first.
+    def test_production_hardening_flags_are_all_there(self):
+        flags = step("contract")["env"]["RUN_FLAGS"].split()
+        for flag in ["--read-only", "--cap-drop=all", "--security-opt=no-new-privileges", "--pids-limit=2048"]:
+            self.assertIn(flag, flags)
+        for path in ["/tmp", "/var/tmp", "/run"]:
+            # Podman's read-only tmpfs is exec; Docker's default is noexec.
+            self.assertIn(f"--tmpfs={path}:rw,exec,nosuid,nodev", flags)
+
+
 @unittest.skipUnless(ENGINE, "needs ENGINE=docker or ENGINE=podman; run `make contract-test`")
 class ContractTest(unittest.TestCase):
     @classmethod
@@ -62,6 +74,18 @@ class ContractTest(unittest.TestCase):
         result = run_contract(self.images["sample"])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("meets the container contract", result.stdout)
+
+    def test_app_reads_its_sample_secrets_file(self):
+        fixture = FIXTURES / "reads-secrets"
+        with tempfile.TemporaryDirectory() as context:
+            for name in ("README.md", ".env.example"):
+                shutil.copy(SAMPLE / name, context)
+            shutil.copy(fixture / "app.json.example", context)
+            result = run_contract(self.images["reads-secrets"], context=Path(context), app_json="app.json.example")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            # Without it the app gets {} and refuses to start.
+            self.assert_fails_with(run_contract(self.images["reads-secrets"], context=Path(context)),
+                                   "exited with code 3", "GREETING missing")
 
     def test_root_image_fails(self):
         self.assert_fails_with(run_contract(self.images["root"]),
