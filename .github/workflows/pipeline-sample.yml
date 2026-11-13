@@ -1,0 +1,11 @@
+# The sample caller: what an app's CI file looks like, about 10 lines. An app
+# calls ArachneDev/app-pipeline/.github/workflows/build.yml@v1 with no inputs.
+name: pipeline-sample
+on:
+  pull_request:
+  push: {branches: [main], tags: ["v*.*.*"]}
+jobs:
+  build:
+    permissions: {contents: read, packages: write}
+    uses: ./.github/workflows/build.yml
+    with: {app: pipeline-sample, context: sample}
