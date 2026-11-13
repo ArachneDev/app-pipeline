@@ -134,8 +134,9 @@ jobs:
           IMAGE: ${{ steps.vars.outputs.image }}
           IGNORE_FILE: ${{ inputs.trivy-ignore }}
         run: |
-          trivy image --no-progress --severity CRITICAL --ignore-unfixed --exit-code 1 \
-            --ignorefile "$IGNORE_FILE" "$IMAGE"
+          ignore=()
+          [ -f "$IGNORE_FILE" ] && ignore=(--ignorefile "$IGNORE_FILE")
+          trivy image --no-progress --severity CRITICAL --ignore-unfixed --exit-code 1 "${ignore[@]}" "$IMAGE"
 
       - name: Push to ghcr.io (tag pushes only)
         id: push

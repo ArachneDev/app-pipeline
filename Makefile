@@ -9,6 +9,6 @@ GITMNT := $(if $(filter $(CURDIR)/.git,$(GITDIR)),,$(if $(GITDIR),-v "$(GITDIR)"
 .PHONY: check
 
 check:
-	@$(ENGINE) build -q -t $(IMAGE) tools/check-image >/dev/null
+	@$(ENGINE) build -q -t $(IMAGE) -f tools/check-image/Containerfile tools/check-image >/dev/null
 	@$(ENGINE) run --rm --security-opt label=disable -v "$(CURDIR)":/repo:ro $(GITMNT) -w /repo $(IMAGE) \
 	  sh -c 'python tools/checks/pins.py && python -m unittest discover -s tests && gitleaks git --no-banner --redact .'
