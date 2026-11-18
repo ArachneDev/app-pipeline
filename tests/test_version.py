@@ -84,9 +84,10 @@ class Channels(unittest.TestCase):
                 result, out = run_vars("branch", "main", event="workflow_dispatch", promote="true", dispatch_version=v)
                 self.assertNotEqual(result.returncode, 0)
 
-    def test_dispatch_needs_promote(self):
+    def test_dispatch_without_promote_is_a_plain_build(self):
         result, out = run_vars("branch", "main", event="workflow_dispatch", dispatch_version="v1.2.0")
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((out["channel"], out["build"], out["publish"]), ("", "true", "false"))
 
 
 if __name__ == "__main__":

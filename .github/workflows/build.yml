@@ -112,11 +112,9 @@ jobs:
           repo="ghcr.io/${OWNER,,}/${app,,}"
           vre='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
           build=true publish=false channel=""
-          if [ "${EVENT_NAME:-}" = workflow_dispatch ]; then
-            # Re-promote an earlier release: no build, the same approval.
-            if [ "$PROMOTE" != true ]; then
-              echo "::error::workflow_dispatch moves :prod, so the caller must set promote: true."; exit 1
-            fi
+          if [ "${EVENT_NAME:-}" = workflow_dispatch ] && [ "$PROMOTE" = true ]; then
+            # Re-promote an earlier release: no build, the same approval. Without
+            # promote, a manual run is a plain build, as it was before this input.
             if [[ ! "${DISPATCH_VERSION:-}" =~ $vre ]]; then
               echo "::error::the version input must be a published version such as v1.4.0."; exit 1
             fi
