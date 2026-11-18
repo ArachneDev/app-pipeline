@@ -9,6 +9,7 @@ digest the registry served, whatever the manifest type.
 import json
 import os
 import subprocess
+import tempfile
 import unittest
 import urllib.request
 
@@ -48,6 +49,10 @@ def put_index(tag, image_digest, size, note):
 class RealRegistry(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        # No credentials: point skopeo at an auth file that does not exist, so it never reads /run/containers/<uid>.
+        auth = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(auth.cleanup)
+        os.environ["REGISTRY_AUTH_FILE"] = os.path.join(auth.name, "auth.json")
         subprocess.run(["skopeo", "copy", "--dest-tls-verify=false", f"docker://{BUSYBOX}", f"docker://{REPO}:image"], check=True, capture_output=True)
         cls.image = served_digest("image")
         size = int(urllib.request.urlopen(urllib.request.Request(f"http://{REGISTRY}/v2/app/manifests/image", headers={"Accept": ACCEPT})).headers["Content-Length"])
@@ -61,7 +66,7 @@ class RealRegistry(unittest.TestCase):
     def promote(self, new, behave=None, **extra):
         health = Health(lambda: None, {}, behave) if behave else None
         env = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/tmp"), "INSECURE_REGISTRY": "true",
-               "IMAGE_REPO": REPO, "VERSION": "v2.0.0", "CHANNEL": "staging", "DIGEST": new,
+               "REGISTRY_AUTH_FILE": os.environ["REGISTRY_AUTH_FILE"], "IMAGE_REPO": REPO, "VERSION": "v2.0.0", "CHANNEL": "staging", "DIGEST": new,
                "WINDOW": "4", "FAILURES": "2", "HEALTH_INTERVAL": "0.5", "PRODUCTION_URL": "",
                "STAGING_URL": health.url if health else "", "CF_ACCESS_CLIENT_ID": "", "CF_ACCESS_CLIENT_SECRET": ""} | extra
         try:
