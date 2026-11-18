@@ -54,9 +54,9 @@ on:
         type: string
         default: ""
       verify-window:
-        description: "Seconds to poll after a move: about 2 host-timer intervals plus start-up time. Default 780 is 2 x (300 s interval + 30 s delay) + 120 s. The first half is the start-up allowance: failures count only after it, or once the new version has shown."
+        description: "Seconds to poll after a move: about 2 host-timer intervals plus start-up time. Default 900 rounds up 2 x (300 s interval + 30 s delay) + 120 s. The first half (450 s) is the start-up allowance, one interval plus delay plus 120 s of start-up: failures count only after it, or once the new version has shown."
         type: string
-        default: "780"
+        default: "900"
       verify-failures:
         description: How many polls in a row must fail before the tag is moved back. A shorter blip is ignored.
         type: string

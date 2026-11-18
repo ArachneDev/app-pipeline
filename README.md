@@ -54,7 +54,7 @@ The deployment history of the `production` or `staging` Environment lists each r
 **Verify and revert.** After the move the job polls the health URL, which must answer 2xx with the version (ADR-006, Phase B):
 
 1. It records the digest the tag pointed at, exactly as the registry serves it, for an image or an index. Check: the log says `Recorded :prod at sha256:...`.
-2. It polls every 15 s for `verify-window` seconds. Failures count only after the first half of the window, the start-up allowance, or once the new version has shown.
+2. It polls every 15 s for `verify-window` seconds. Failures count only after the first half of the window, the start-up allowance (one timer cycle plus start-up), or once the new version has shown.
 3. `verify-failures` failed polls in a row move the tag back to the recorded digest, without a new approval, and fail the job with the reason. A shorter blip is ignored.
 4. A release that never shows the new version in the window is moved back too. A registry error before the move fails the job and moves nothing.
 5. A first release has no earlier digest: the job fails and the tag stays.
@@ -63,7 +63,7 @@ An empty URL skips the check, for an app with no port. Change the window togethe
 
 **Behind Cloudflare Access.** Set the organization Actions secrets `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` to a read-only service token, and add `secrets: inherit`. The job sends them as headers and never prints them.
 
-One job runs per app and channel at a time. A newer run waits behind the one in progress, and a newer pending run replaces an older pending one.
+One promote job runs per app and channel at a time, and a run waiting for approval counts as running. A newer run waits behind it, so the owner approves or rejects the older one first. A newer run replaces an older one that is only queued, which GitHub shows as cancelled [Local test, newapp-test run 44346932502].
 
 ## What it does
 
@@ -92,7 +92,7 @@ All optional. Most apps pass none.
 | `memory` | `512m` | Memory limit for the contract test: the measured peak plus 25 to 50 percent. A number above 0 with a unit: `k`, `m` or `g` |
 | `promote` | `false` | Move `:prod` and `:staging` as in Release channels |
 | `production-url`, `staging-url` | Empty: no check | Health URL polled after `:prod` or `:staging` moves |
-| `verify-window` | `780` | Seconds to poll: 2 x (300 s timer interval + 30 s delay) + 120 s start-up |
+| `verify-window` | `900` | Seconds to poll: 2 timer intervals (300 s plus up to 30 s delay) plus start-up, rounded up. The first half is one interval plus delay plus 120 s of start-up |
 | `verify-failures` | `3` | Failed polls in a row that move the tag back |
 
 The secrets `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` are optional.
