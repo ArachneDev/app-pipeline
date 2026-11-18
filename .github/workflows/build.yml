@@ -1,6 +1,8 @@
 # The shared build: gitleaks on the repo, a build-args check, build the
 # Containerfile, the contract test, Trivy scan, and on a tag push
-# ghcr.io/<owner>/<app>:<tag>.
+# ghcr.io/<owner>/<app>:<tag>. With `promote: true` it also moves the channel
+# tags: :prod after the owner approves, :staging on a push to `staging`, each
+# with verify-and-revert (ADR-006, Phase B).
 # Apps call it from a short CI file; see README.md. Changing it: AGENTS.md.
 name: build
 
@@ -39,10 +41,37 @@ on:
         description: Memory limit for the contract test, as in production (--memory). Set it to the app's measured peak plus 25 to 50 percent.
         type: string
         default: 512m
+      promote:
+        description: "Move the channel tags: :prod on a version tag (after the `production` Environment approves) and on a workflow_dispatch with a version, :staging on a push to the staging branch. The caller needs the Environment first."
+        type: boolean
+        default: false
+      production-url:
+        description: The app's public health URL, such as https://app.doublew.nu/healthz. After :prod moves, the job polls it for the new version. Empty skips the check, for an app with no port.
+        type: string
+        default: ""
+      staging-url:
+        description: The same for the app's staging slot, such as https://staging1.doublew.nu/healthz. Empty skips the check.
+        type: string
+        default: ""
+      verify-window:
+        description: "Seconds to poll after a move: about 2 host-timer intervals plus start-up time. Default 780 is 2 x (300 s interval + 30 s delay) + 120 s. The first half is the start-up allowance: failures count only after it, or once the new version has shown."
+        type: string
+        default: "780"
+      verify-failures:
+        description: How many polls in a row must fail before the tag is moved back. A shorter blip is ignored.
+        type: string
+        default: "3"
+    secrets:
+      CF_ACCESS_CLIENT_ID:
+        description: Client ID of a read-only Cloudflare Access service token, for a health URL behind Access. Optional.
+        required: false
+      CF_ACCESS_CLIENT_SECRET:
+        description: Client secret of the same token. Optional.
+        required: false
     outputs:
       image:
         description: The image reference built, ghcr.io/<owner>/<app>:<version>.
-        value: ${{ jobs.build.outputs.image }}
+        value: ${{ jobs.plan.outputs.image }}
       digest:
         description: The pushed digest (sha256:...). Empty when nothing was pushed.
         value: ${{ jobs.build.outputs.digest }}
@@ -50,14 +79,79 @@ on:
 permissions: {}
 
 jobs:
+  # Decides what this run does, so a re-promote can skip the build.
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      app: ${{ steps.vars.outputs.app }}
+      repo: ${{ steps.vars.outputs.repo }}
+      image: ${{ steps.vars.outputs.image }}
+      version: ${{ steps.vars.outputs.version }}
+      publish: ${{ steps.vars.outputs.publish }}
+      build: ${{ steps.vars.outputs.build }}
+      channel: ${{ steps.vars.outputs.channel }}
+    steps:
+      # Tested by tests/test_version.py, which runs this exact script.
+      - name: Compute image name, version and channel
+        id: vars
+        env:
+          APP: ${{ inputs.app }}
+          PROMOTE: ${{ inputs.promote }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          OWNER: ${{ github.repository_owner }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          # The caller's workflow_dispatch input; github.event is the caller's event.
+          DISPATCH_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          app="${APP:-$REPO_NAME}"
+          repo="ghcr.io/${OWNER,,}/${app,,}"
+          vre='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
+          build=true publish=false channel=""
+          if [ "${EVENT_NAME:-}" = workflow_dispatch ]; then
+            # Re-promote an earlier release: no build, the same approval.
+            if [ "$PROMOTE" != true ]; then
+              echo "::error::workflow_dispatch moves :prod, so the caller must set promote: true."; exit 1
+            fi
+            if [[ ! "${DISPATCH_VERSION:-}" =~ $vre ]]; then
+              echo "::error::the version input must be a published version such as v1.4.0."; exit 1
+            fi
+            version="$DISPATCH_VERSION" build=false channel=production
+          elif [ "$REF_TYPE" = tag ]; then
+            # Only vX.Y.Z (optionally -prerelease) publishes. Tags such as prod and
+            # staging are moved by the promote job and must never be pushed here.
+            if [[ ! "$REF_NAME" =~ $vre ]]; then
+              echo "::error::tag ${REF_NAME:0:60} is not a version such as v1.4.0. Only version tags publish."; exit 1
+            fi
+            version="$REF_NAME" publish=true
+            [ "$PROMOTE" = true ] && channel=production
+          else
+            version="sha-${SHA:0:12}"
+            # A push to staging publishes this build, then the promote job moves :staging to it.
+            if [ "$PROMOTE" = true ] && [ "${EVENT_NAME:-}" = push ] && [ "$REF_NAME" = staging ]; then
+              publish=true channel=staging
+            fi
+          fi
+          image="$repo:${version}"
+          echo "Image: $image (publish: $publish, channel: ${channel:-none})"
+          {
+            echo "app=${app,,}"; echo "repo=$repo"; echo "image=$image"; echo "version=$version"
+            echo "publish=$publish"; echo "build=$build"; echo "channel=$channel"
+          } >> "$GITHUB_OUTPUT"
+
   build:
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
       packages: write
     outputs:
-      image: ${{ steps.vars.outputs.image }}
       digest: ${{ steps.push.outputs.digest }}
     env:
       # Keep the gitleaks pin equal to tools/check-image/Containerfile.
@@ -80,31 +174,6 @@ jobs:
           tar -xzf gitleaks.tgz -C "$bin" gitleaks
           tar -xzf trivy.tgz -C "$bin" trivy
           echo "$bin" >> "$GITHUB_PATH"
-
-      - name: Compute image name and version
-        id: vars
-        env:
-          APP: ${{ inputs.app }}
-          REPO_NAME: ${{ github.event.repository.name }}
-          OWNER: ${{ github.repository_owner }}
-          REF_TYPE: ${{ github.ref_type }}
-          REF_NAME: ${{ github.ref_name }}
-          SHA: ${{ github.sha }}
-        run: |
-          app="${APP:-$REPO_NAME}"
-          if [ "$REF_TYPE" = tag ]; then
-            # Only vX.Y.Z (optionally -prerelease) publishes. Tags such as prod and
-            # staging are moved by the release flow and must never be pushed here.
-            if [[ ! "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-              echo "::error::tag ${REF_NAME:0:60} is not a version such as v1.4.0. Only version tags publish."; exit 1
-            fi
-            version="$REF_NAME" publish=true
-          else
-            version="sha-${SHA:0:12}" publish=false
-          fi
-          image="ghcr.io/${OWNER,,}/${app,,}:${version}"
-          echo "Image: $image (publish: $publish)"
-          { echo "image=$image"; echo "version=$version"; echo "publish=$publish"; } >> "$GITHUB_OUTPUT"
 
       # Tested by tests/test_build_args.py, which runs this exact script.
       - name: Refuse secret-shaped build arguments
@@ -148,8 +217,8 @@ jobs:
 
       - name: Build the image
         env:
-          IMAGE: ${{ steps.vars.outputs.image }}
-          VERSION: ${{ steps.vars.outputs.version }}
+          IMAGE: ${{ needs.plan.outputs.image }}
+          VERSION: ${{ needs.plan.outputs.version }}
           CONTEXT: ${{ inputs.context }}
           CONTAINERFILE: ${{ inputs.containerfile }}
           BUILD_ARGS: ${{ inputs.build-args }}
@@ -172,8 +241,8 @@ jobs:
       - name: Run the image under production hardening (container contract)
         id: contract
         env:
-          IMAGE: ${{ steps.vars.outputs.image }}
-          VERSION: ${{ steps.vars.outputs.version }}
+          IMAGE: ${{ needs.plan.outputs.image }}
+          VERSION: ${{ needs.plan.outputs.version }}
           CONTEXT: ${{ inputs.context }}
           APP_JSON: ${{ inputs.app-json }}
           HEALTH_PATH: ${{ inputs.health-path }}
@@ -308,24 +377,210 @@ jobs:
 
       - name: Fail on critical CVEs that have a fix
         env:
-          IMAGE: ${{ steps.vars.outputs.image }}
+          IMAGE: ${{ needs.plan.outputs.image }}
           IGNORE_FILE: ${{ inputs.trivy-ignore }}
         run: |
           ignore=()
           [ -f "$IGNORE_FILE" ] && ignore=(--ignorefile "$IGNORE_FILE")
           trivy image --no-progress --severity CRITICAL --ignore-unfixed --exit-code 1 "${ignore[@]}" "$IMAGE"
 
-      - name: Push to ghcr.io (tag pushes only)
+      # Tested by tests/test_push.py, which runs this exact script.
+      - name: Push to ghcr.io (version tags and staging builds)
         id: push
-        if: steps.vars.outputs.publish == 'true'
+        if: needs.plan.outputs.publish == 'true'
         env:
-          IMAGE: ${{ steps.vars.outputs.image }}
+          IMAGE: ${{ needs.plan.outputs.image }}
+          VERSION: ${{ needs.plan.outputs.version }}
           TOKEN: ${{ github.token }}
           ACTOR: ${{ github.actor }}
         run: |
           printf '%s' "$TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+          err="$(mktemp)"
+          trap 'docker logout ghcr.io >/dev/null 2>&1 || true; rm -f "$err"' EXIT
+          # A published tag never moves. Read it first; if the read fails for any
+          # reason except "no such tag", push nothing.
+          if existing="$(skopeo inspect --authfile "$HOME/.docker/config.json" --no-tags --format '{{.Digest}}' "docker://$IMAGE" 2>"$err")"; then
+            if [[ "$VERSION" == sha-* ]]; then
+              # A rerun of the same commit on staging: keep the image already published.
+              echo "$IMAGE is already published at $existing for this commit; keeping it."
+              echo "digest=$existing" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error title=Version already published::$IMAGE is already published at $existing, so this run pushed nothing. Version tags never move. Fix: to release again, push a new version tag; to move :prod to this version, run the workflow with the version input."
+            exit 1
+          elif ! grep -qiE 'manifest unknown|name unknown|not found|404' "$err"; then
+            cat "$err" >&2
+            echo "::error::could not check whether $IMAGE is already published, so nothing was pushed. Fix: run the job again."
+            exit 1
+          fi
           docker push "$IMAGE"
           digest="$(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE")"
           echo "digest=${digest#*@}" >> "$GITHUB_OUTPUT"
           echo "Pushed $IMAGE at ${digest#*@}"
-          docker logout ghcr.io
+
+  # Moves the channel tag to the tested digest, then checks the release came up
+  # and moves the tag back if it did not (ADR-006, Phase B). The `production`
+  # Environment's required reviewer is the approval; `staging` has none.
+  promote:
+    needs: [plan, build]
+    # A re-promote skips the build; a failed or cancelled build never promotes.
+    if: ${{ !cancelled() && needs.plan.outputs.channel != '' && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      packages: write
+    environment:
+      name: ${{ needs.plan.outputs.channel }}
+      # The deployment history shows this link, so it names the version.
+      url: https://github.com/orgs/${{ github.repository_owner }}/packages/container/package/${{ needs.plan.outputs.app }}?tag=${{ needs.plan.outputs.version }}
+    # One promotion per app and channel at a time. Not one group for both
+    # channels: a staging push would cancel a production run waiting for approval.
+    concurrency:
+      group: promote-${{ needs.plan.outputs.app }}-${{ needs.plan.outputs.channel }}
+      cancel-in-progress: false
+    steps:
+      - name: Log in to ghcr.io
+        env:
+          TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          auth="$RUNNER_TEMP/registry-auth.json"
+          printf '%s' "$TOKEN" | skopeo login ghcr.io -u "$ACTOR" --password-stdin --authfile "$auth"
+          echo "REGISTRY_AUTH_FILE=$auth" >> "$GITHUB_ENV"
+
+      # Tested by tests/test_promote.py, which runs this exact script against a
+      # stub registry and a stub health server, and by CI's registry job against
+      # a real registry. INSECURE_REGISTRY and HEALTH_INTERVAL are for those tests.
+      - name: Move the channel tag, verify, move it back on failure
+        id: promote
+        env:
+          IMAGE_REPO: ${{ needs.plan.outputs.repo }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          CHANNEL: ${{ needs.plan.outputs.channel }}
+          # The tested digest from the build; empty on a re-promote, which reads the version tag.
+          DIGEST: ${{ needs.build.outputs.digest }}
+          PRODUCTION_URL: ${{ inputs.production-url }}
+          STAGING_URL: ${{ inputs.staging-url }}
+          WINDOW: ${{ inputs.verify-window }}
+          FAILURES: ${{ inputs.verify-failures }}
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+        run: |
+          tag=staging HEALTH_URL="$STAGING_URL"
+          [ "$CHANNEL" = production ] && { tag=prod; HEALTH_URL="$PRODUCTION_URL"; }
+          tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+          inspect_flags=() copy_flags=()
+          if [ "${INSECURE_REGISTRY:-}" = true ]; then
+            inspect_flags=(--tls-verify=false) copy_flags=(--src-tls-verify=false --dest-tls-verify=false)
+          fi
+          summary() { [ -n "${GITHUB_STEP_SUMMARY:-}" ] && printf '%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"; return 0; }
+
+          # The digest a name points at, exactly as the registry serves it: the
+          # index digest for an index, the image digest for an image. Exit 3 when
+          # the name does not exist; any other failure exits 1 and prints why.
+          digest_of() {
+            local out
+            if out="$(skopeo inspect "${inspect_flags[@]}" --no-tags --format '{{.Digest}}' "docker://$IMAGE_REPO$1" 2>"$tmp/err")"; then
+              printf '%s\n' "$out"; return 0
+            fi
+            if grep -qiE 'manifest unknown|name unknown|not found|404' "$tmp/err"; then return 3; fi
+            cat "$tmp/err" >&2; return 1
+          }
+          kind_of() { # image or index
+            if skopeo inspect "${inspect_flags[@]}" --raw "docker://$IMAGE_REPO@$1" 2>/dev/null | grep -q '"manifests"'; then echo index; else echo image; fi
+          }
+          # Copy by digest with no rebuild. --all copies every platform of an index;
+          # --preserve-digests fails rather than write a manifest with another digest.
+          move_to() {
+            skopeo copy "${copy_flags[@]}" --all --preserve-digests "docker://$IMAGE_REPO@$1" "docker://$IMAGE_REPO:$tag" >/dev/null \
+              && [ "$(digest_of ":$tag")" = "$1" ]
+          }
+
+          if [[ ! "$WINDOW" =~ ^[1-9][0-9]*$ ]] || [ "$WINDOW" -gt 3000 ]; then
+            echo "::error::verify-window must be a number of seconds from 1 to 3000."; exit 1
+          fi
+          if [[ ! "$FAILURES" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::verify-failures must be a number above 0."; exit 1
+          fi
+
+          # 1. The digest to move to: the tested build, or the version tag's image.
+          target="$DIGEST"
+          if [ -z "$target" ]; then
+            rc=0; target="$(digest_of ":$VERSION")" || rc=$?
+            if [ "$rc" = 3 ]; then echo "::error::$IMAGE_REPO:$VERSION does not exist, so there is nothing to promote. Fix: give a version that was published."; exit 1; fi
+            [ "$rc" = 0 ] || { echo "::error::could not read $IMAGE_REPO:$VERSION; nothing moved."; exit 1; }
+          fi
+          if [[ ! "$target" =~ ^sha256:[0-9a-f]{64}$ ]]; then echo "::error::not a digest: ${target:0:80}"; exit 1; fi
+
+          # 2. Record what the tag points at now, to move back to.
+          rc=0; prev="$(digest_of ":$tag")" || rc=$?
+          if [ "$rc" = 3 ]; then prev=""
+          elif [ "$rc" != 0 ]; then echo "::error::could not read :$tag; nothing moved. Fix: run the job again."; exit 1; fi
+          if [ -n "$prev" ]; then echo "Recorded :$tag at $prev ($(kind_of "$prev"))"; else echo "Recorded: :$tag does not exist yet, so there is nothing to move back to."; fi
+          echo "Target $VERSION at $target ($(kind_of "$target"))"
+
+          revert() { # reason
+            local reason="$1"
+            if [ -z "$prev" ]; then
+              echo "::error title=Release failed::$reason. :$tag had no earlier digest, so it was left on $VERSION."
+              summary "Release of $VERSION failed: $reason. :$tag was left on it (no earlier digest)."
+            elif [ "$prev" = "$target" ]; then
+              echo "::error title=Release failed::$reason. :$tag already pointed at this digest, so there is nothing to move back to."
+              summary "Release of $VERSION failed: $reason."
+            elif move_to "$prev"; then
+              echo "::error title=Release moved back::$reason. :$tag is back at $prev, the digest it replaced."
+              summary "Release of $VERSION moved back: $reason. :$tag is at $prev again."
+            else
+              echo "::error title=Move back failed::$reason. Moving :$tag back to $prev also failed. Fix: run skopeo copy by hand, or release the previous version again."
+              summary "Release of $VERSION failed: $reason. Moving :$tag back to $prev failed too."
+            fi
+            exit 1
+          }
+
+          # 3. Move the tag.
+          if [ "$prev" = "$target" ]; then
+            echo ":$tag already points at $target; nothing to move."
+          elif ! move_to "$target"; then
+            # A failed copy leaves the tag where it was; find out before deciding.
+            now="$(digest_of ":$tag" || true)"
+            if [ "$now" = "$prev" ]; then echo "::error::the copy to :$tag failed; the tag did not move."; exit 1; fi
+            revert "the copy to :$tag did not end on $target"
+          else
+            echo ":$tag now points at $target"
+          fi
+
+          # 4. Verify. An app with no port has no URL: the tag moved and that is all.
+          if [ -z "$HEALTH_URL" ]; then
+            echo "::notice::No health URL for this channel, so the release was not verified."
+            summary "$VERSION moved to :$tag at $target. Not verified: no health URL."
+            exit 0
+          fi
+          hdr=()
+          if [ -n "$CF_ACCESS_CLIENT_ID" ] && [ -n "$CF_ACCESS_CLIENT_SECRET" ]; then
+            # In a file, so the values never reach a command line or the log.
+            ( umask 077; printf 'CF-Access-Client-Id: %s\nCF-Access-Client-Secret: %s\n' "$CF_ACCESS_CLIENT_ID" "$CF_ACCESS_CLIENT_SECRET" > "$tmp/headers" )
+            hdr=(-H "@$tmp/headers")
+          fi
+          interval="${HEALTH_INTERVAL:-15}" allowance=$((WINDOW / 2))
+          start=$SECONDS seen=0 bad=0 polls=0 reason=""
+          echo "Polling $HEALTH_URL for $VERSION every ${interval}s for ${WINDOW}s; failures count after ${allowance}s, or once it has shown; $FAILURES in a row move :$tag back."
+          while :; do
+            elapsed=$((SECONDS - start)); polls=$((polls + 1))
+            code="$(curl -sS -m 5 "${hdr[@]}" -o "$tmp/body" -w '%{http_code}' "$HEALTH_URL" 2>"$tmp/curl-err")" || code=000
+            if [[ "$code" =~ ^2 ]] && head -c 4096 "$tmp/body" | grep -oE '[[:alnum:]._+-]+' | grep -qxF -- "$VERSION"; then
+              seen=1 bad=0
+            else
+              if [ "$code" = 000 ]; then why="no answer ($(head -c 80 "$tmp/curl-err" | tr -cd '[:print:]'))"
+              elif [[ "$code" =~ ^2 ]]; then why="HTTP $code without $VERSION in the body (got: $(head -c 60 "$tmp/body" | tr -cd '[:print:]'))"
+              else why="HTTP $code"; [[ "$code" =~ ^30 ]] && why="$why, a redirect: behind Cloudflare Access? Set the CF_ACCESS secrets"; fi
+              if [ "$seen" = 1 ] || [ "$elapsed" -ge "$allowance" ]; then
+                bad=$((bad + 1)) reason="$why"
+                [ "$bad" -ge "$FAILURES" ] && revert "$HEALTH_URL failed $bad polls in a row ($why); the new version $VERSION $([ "$seen" = 1 ] && echo 'had shown and then stopped' || echo 'never showed')"
+              fi
+            fi
+            [ "$elapsed" -ge "$WINDOW" ] && break
+            sleep "$interval"
+          done
+          [ "$seen" = 1 ] || revert "$HEALTH_URL never reported $VERSION in ${WINDOW}s (last: ${reason:-no failing poll after the allowance})"
+          echo "$VERSION held on $HEALTH_URL for ${WINDOW}s; :$tag is at $target."
+          summary "$VERSION is live on :$tag at $target and held for ${WINDOW}s."

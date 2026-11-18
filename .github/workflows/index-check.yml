@@ -1,0 +1,18 @@
+# Temporary: answers whether build.yml's `docker push` publishes an index or one
+# manifest (ticket 44). Deleted before merge.
+name: index-check
+on: pull_request
+permissions: {contents: read, packages: read}
+jobs:
+  index-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - env: {TOKEN: "${{ github.token }}"}
+        run: |
+          printf '%s' "$TOKEN" | skopeo login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          for v in v1.0.0 v1.1.0; do
+            echo "== pipeline-sample:$v"
+            skopeo inspect --no-tags --format '{{.Digest}}' docker://ghcr.io/arachnedev/pipeline-sample:$v
+            skopeo inspect --raw docker://ghcr.io/arachnedev/pipeline-sample:$v | grep -E '"(mediaType|manifests)"' | head -3
+          done

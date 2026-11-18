@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# A stand-in for docker in the push test. `push` records the tag; `inspect` returns a fixed digest.
+set -u
+echo "$*" >> "$STUB/calls.log"
+case "$1" in
+  login) cat >/dev/null ;;
+  push) printf '%s\n' "$STUB_PUSH_DIGEST" > "$STUB/tags/${2##*:}" ;;
+  inspect) echo "ghcr.io/arachnedev/app@$STUB_PUSH_DIGEST" ;;
+  logout) ;;
+esac

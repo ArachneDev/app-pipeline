@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# A stand-in for skopeo over a directory, for the promote and push tests.
+#   $STUB/tags/<tag>     the digest a tag points at
+#   $STUB/kinds/<digest> "image" or "index"
+#   $STUB/calls.log      every call, one line each
+# Fault switches: STUB_READ_ERROR=1 fails every inspect with a server error;
+# STUB_COPY_FAIL=1 fails every copy and leaves the tags alone; STUB_COPY_FAIL_AFTER=N
+# fails every copy after the first N.
+set -u
+echo "$*" >> "$STUB/calls.log"
+cmd="$1"; shift
+refs=() fmt="" raw=0 all=0 pd=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --format) fmt="$2"; shift ;;
+    --raw) raw=1 ;;
+    --all) all=1 ;;
+    --preserve-digests) pd=1 ;;
+    --authfile|-u) shift ;;
+    --*) ;;
+    *) refs+=("${1#docker://}") ;;
+  esac
+  shift
+done
+
+# repo:tag or repo@digest -> a tag name or a digest
+resolve() {
+  local ref="$1" name
+  if [[ "$ref" == *@sha256:* ]]; then echo "${ref#*@}"; return 0; fi
+  name="${ref##*:}"
+  [ -f "$STUB/tags/$name" ] && { cat "$STUB/tags/$name"; return 0; }
+  echo "Error: reading manifest $name in ${ref%:*}: manifest unknown" >&2; return 1
+}
+
+case "$cmd" in
+  login) cat >/dev/null ;;
+  inspect)
+    [ "${STUB_READ_ERROR:-}" = 1 ] && { echo "Error: received unexpected HTTP status: 500 Internal Server Error" >&2; exit 1; }
+    d="$(resolve "${refs[0]}")" || exit 1
+    if [ "$raw" = 1 ]; then
+      if [ "$(cat "$STUB/kinds/$d")" = index ]; then echo '{"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[]}'
+      else echo '{"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{}}'; fi
+    else
+      echo "$d"
+    fi ;;
+  copy)
+    [ "$all" = 1 ] && [ "$pd" = 1 ] || { echo "stub: copy needs --all and --preserve-digests" >&2; exit 2; }
+    [ "${STUB_COPY_FAIL:-}" = 1 ] && { echo "Error: copying failed" >&2; exit 1; }
+    if [ -n "${STUB_COPY_FAIL_AFTER:-}" ] && [ "$(grep -c '^copy' "$STUB/calls.log")" -gt "$STUB_COPY_FAIL_AFTER" ]; then
+      echo "Error: copying failed" >&2; exit 1
+    fi
+    d="$(resolve "${refs[0]}")" || exit 1
+    [ -f "$STUB/kinds/$d" ] || { echo "Error: manifest unknown" >&2; exit 1; }
+    printf '%s\n' "$d" > "$STUB/tags/${refs[1]##*:}" ;;
+  *) echo "stub: unsupported skopeo $cmd" >&2; exit 2 ;;
+esac
