@@ -7,7 +7,8 @@ This repo is the reusable workflow every app calls, so a change here reaches eve
 | `.github/workflows/build.yml` | The shared workflow apps call: build, contract test, scan, publish. Its `contract` step's `RUN_FLAGS` is the one list of production hardening flags |
 | `.github/workflows/pipeline-sample.yml` | The sample caller. It runs `build.yml` from this commit on every PR |
 | `sample/` | `pipeline-sample`, a test image only. Never deployed |
-| `tests/`, `tools/checks/` | What `make check` runs |
+| `Makefile`, `.github/workflows/check.yml` | `make check` and `make contract-test`, and the CI workflow that runs both on every PR and push to `main` |
+| `tests/`, `tools/checks/`, `tools/check-image/` | What `make check` runs, and the pinned image it runs in |
 | `tests/fixtures/contract/` | Images that break the contract on purpose, for `make contract-test` |
 
 ## Versioning
