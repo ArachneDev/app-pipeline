@@ -1,5 +1,6 @@
-# Runs `make check` (the pin check, the tests and gitleaks, in the check image)
-# and `make contract-test` (the contract test against real images, with docker).
+# Runs `make check` (the pin check, the tests and gitleaks, in the check image),
+# `make contract-test` (the contract test against real images, with docker) and
+# `make registry-test` (the promote step against a real registry and skopeo).
 name: check
 on:
   pull_request:
@@ -25,3 +26,21 @@ jobs:
           "$RUNNER_TEMP/venv/bin/pip" install -q --require-hashes -r tools/check-image/requirements.txt
           echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
       - run: make contract-test ENGINE=docker
+  registry:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    services:
+      registry:
+        image: registry:2.8.3@sha256:46faa9a1ae6813194b53921a370f2f4f8c5e1aae228a89bceafef5847a6a3278
+        ports: ["5000:5000"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {persist-credentials: false}
+      - name: Install PyYAML by hash
+        run: |
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -q --require-hashes -r tools/check-image/requirements.txt
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+      # skopeo comes with the runner image; the promote job relies on it too.
+      - run: skopeo --version
+      - run: make registry-test

@@ -3,9 +3,10 @@
 # one in .github/workflows/build.yml.
 FROM docker.io/library/python:3.12.16-alpine3.24@sha256:a61cbd76a882645de7f91423329fe43a67eed60d7da24f9e5331414bb3618b20
 
-# bash runs the workflow steps under test. If a build fails with "unable to
-# select packages", bump to the version `apk policy bash` shows.
-RUN apk add --no-cache bash=5.3.9-r1 git=2.54.1-r0 \
+# bash runs the workflow steps under test, and curl is what the promote step
+# polls with. If a build fails with "unable to select packages", bump to the
+# version `apk policy <name>` shows.
+RUN apk add --no-cache bash=5.3.9-r1 curl=8.23.0-r0 git=2.54.1-r0 \
  && git config --system --add safe.directory '*'
 
 ENV PYTHONDONTWRITEBYTECODE=1 PIP_DISABLE_PIP_VERSION_CHECK=1

@@ -4,11 +4,11 @@ This repo is the reusable workflow every app calls, so a change here reaches eve
 
 | Path | What it is |
 |---|---|
-| `.github/workflows/build.yml` | The shared workflow apps call: build, contract test, scan, publish. Its `contract` step's `RUN_FLAGS` is the one list of production hardening flags |
+| `.github/workflows/build.yml` | The shared workflow apps call: plan, build, contract test, scan, publish, and the `promote` job that moves `:prod` and `:staging` with verify-and-revert. Its `contract` step's `RUN_FLAGS` is the one list of production hardening flags |
 | `.github/workflows/pipeline-sample.yml` | The sample caller. It runs `build.yml` from this commit on every PR |
 | `sample/` | `pipeline-sample`, a test image only. Never deployed |
 | `Makefile`, `.github/workflows/check.yml` | `make check` and `make contract-test`, and the CI workflow that runs both on every PR and push to `main` |
-| `tests/`, `tools/checks/`, `tools/check-image/` | What `make check` runs, and the pinned image it runs in |
+| `tests/`, `tools/checks/`, `tools/check-image/` | What `make check` runs, and the pinned image it runs in. `tests/stubs.py` and `tests/fixtures/stubs/` stand in for the registry and the app, so promote and revert are tested with no deploy |
 | `tests/fixtures/contract/` | Images that break the contract on purpose, for `make contract-test` |
 
 ## Versioning
@@ -26,6 +26,7 @@ A breaking change needs a new major tag (`v2`) and a note to every app. Breaking
 - Removing or renaming an input or output, or changing a default.
 - Changing the image name, the version tag format or the registry.
 - Needing a new permission in the caller's `permissions:` block.
+- Moving a tag for callers that did not ask. Anything that moves `:prod` or `:staging` stays behind `promote: true`.
 - A stricter check that turns existing apps red, unless it closes a security hole. Then ship it in `v1` and tell every app first.
 
 Adding an optional input, fixing a bug, or bumping a pinned tool is not breaking.
@@ -34,8 +35,9 @@ Adding an optional input, fixing a bug, or bumping a pinned tool is not breaking
 
 1. Run `make check`. It runs the pin check, the tests and gitleaks in a pinned image. Check: it ends with `OK` and `no leaks found`.
 2. If you touched the `contract` step, run `make contract-test` (needs Podman or Docker). Check: it ends with `OK` and no skips.
-3. Open a PR. The `pipeline-sample` job runs the changed `build.yml` end to end, without pushing.
-4. A new rule gets a test in `tests/` that goes red on a planted violation.
+3. If you touched the `promote` step, run `make registry-test` (needs skopeo and a registry on `localhost:5000`; CI's `registry` job has both). Check: it ends with `OK` and no skips.
+4. Open a PR. The `pipeline-sample` job runs the changed `build.yml` end to end, without pushing.
+5. A new rule gets a test in `tests/` that goes red on a planted violation.
 
 Every `uses:` is pinned by full commit SHA; `tools/checks/pins.py` enforces it. Downloaded tools are pinned by version and sha256. Keep the gitleaks pin in `build.yml` and `tools/check-image/Containerfile` equal.
 
