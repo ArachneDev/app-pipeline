@@ -97,4 +97,4 @@ All optional. Most apps pass none.
 
 The secrets `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` are optional.
 
-What an image must provide is the container contract in the infra blueprint: <https://github.com/ArachneDev/infra/blob/main/docs/blueprint.md#container-contract>.
+What an image must provide is the container contract, copied in app-starter's `AGENTS.md`: <https://github.com/ArachneDev/app-starter/blob/main/AGENTS.md>.

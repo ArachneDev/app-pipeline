@@ -45,6 +45,6 @@ Every `uses:` is pinned by full commit SHA; `tools/checks/pins.py` enforces it. 
 
 Point to these; don't copy them here.
 
-- What an image must provide: [blueprint, Container contract](https://github.com/ArachneDev/infra/blob/main/docs/blueprint.md#container-contract).
+- What an image must provide: the container contract, copied in [app-starter's AGENTS.md](https://github.com/ArachneDev/app-starter/blob/main/AGENTS.md). The source is the infra blueprint; a weekly check there flags a stale copy.
 - How a release flows: [blueprint, Release hand-off](https://github.com/ArachneDev/infra/blob/main/docs/blueprint.md#release-hand-off) and [ADR-006](https://github.com/ArachneDev/infra/blob/main/docs/adr/0006-deployment-model.md).
 - The template apps start from: [blueprint, App starter repo](https://github.com/ArachneDev/infra/blob/main/docs/blueprint.md#app-starter-repo).
