@@ -41,6 +41,10 @@ on:
         description: Memory limit for the contract test, as in production (--memory). Set it to the app's measured peak plus 25 to 50 percent.
         type: string
         default: 512m
+      contract-exec:
+        description: "More modes of the same image to contract-test, one per line as `<exec> | <health>`: the command to run instead of the image's CMD, and the health command to run inside the container. Both are split on spaces and run with no shell, like infra's exec and health_cmd. A mode passes when the health command exits 0 and prints the build version within 60 s. Empty tests only the default CMD and health-path."
+        type: string
+        default: ""
       promote:
         description: "Move the channel tags: :prod on a version tag (after the `production` Environment approves) and on a workflow_dispatch with a version, :staging on a push to the staging branch. The caller needs the Environment first."
         type: boolean
@@ -245,6 +249,7 @@ jobs:
           APP_JSON: ${{ inputs.app-json }}
           HEALTH_PATH: ${{ inputs.health-path }}
           MEMORY: ${{ inputs.memory }}
+          CONTRACT_EXEC: ${{ inputs.contract-exec }}
           RUN_FLAGS: |
             --read-only
             --tmpfs=/tmp:rw,exec,nosuid,nodev
@@ -275,6 +280,15 @@ jobs:
           if [ -n "$APP_JSON" ] && [ ! -f "$CONTEXT/$APP_JSON" ]; then
             echo "::error::app-json does not name a file in $CONTEXT (the value is not printed). Fix: commit a sample with fake values there and give its path, or leave app-json empty."; exit 1
           fi
+          # One mode per line, "<exec> | <health>"; each side is split on spaces, with no shell.
+          modes=()
+          while IFS= read -r line || [ -n "$line" ]; do
+            [ -n "${line//[[:space:]]/}" ] || continue
+            if [[ "$line" != *" | "* ]] || [ -z "${line%% | *}" ] || [ -z "${line#* | }" ]; then
+              echo "::error::contract-exec needs one '<exec> | <health>' per line, such as 'node apps/bot/dist/main.js | node apps/bot/dist/healthcheck.js' (the value is not printed)."; exit 1
+            fi
+            modes+=("$line")
+          done <<< "${CONTRACT_EXEC:-}"
           mapfile -t flags < <(printf '%s\n' "$RUN_FLAGS" | sed '/^[[:space:]]*$/d')
           [ "${#flags[@]}" -gt 0 ] || { echo "::error::RUN_FLAGS is empty: the contract test would run without hardening."; exit 1; }
 
@@ -304,7 +318,8 @@ jobs:
           fi
 
           name="contract-$$-$RANDOM" net="contract-$$-$RANDOM" tmp="$(mktemp -d)"
-          trap '"$engine" rm -f "$name" >/dev/null 2>&1; "$engine" network rm "$net" >/dev/null 2>&1; rm -rf "$tmp"' EXIT
+          names=("$name")
+          trap '"$engine" rm -f "${names[@]}" >/dev/null 2>&1; "$engine" network rm "$net" >/dev/null 2>&1; rm -rf "$tmp"' EXIT
           if [ -z "$APP_JSON" ]; then
             echo '{}' > "$tmp/app.json"
           else
@@ -316,10 +331,15 @@ jobs:
 
           "$engine" pull -q "$probe" >/dev/null
           "$engine" network create "$net" >/dev/null
-          echo "Running $IMAGE with ${flags[*]} --memory=$MEMORY, PORT=$port and /run/secrets/app.json"
-          if ! "$engine" run -d --name "$name" --network "$net" --network-alias app "${flags[@]}" --memory="$MEMORY" \
+          # Starts a container under the hardening flags: name, then an optional command instead of the image's CMD.
+          start_container() {
+            local n="$1"; shift
+            "$engine" run -d --name "$n" --network "$net" --network-alias app "${flags[@]}" --memory="$MEMORY" \
               "${envfile[@]}" -e "PORT=$port" -e "PUBLIC_URL=https://app.example.com" \
-              -v "$tmp/app.json:/run/secrets/app.json:ro,z" "$IMAGE" >/dev/null; then
+              -v "$tmp/app.json:/run/secrets/app.json:ro,z" "$IMAGE" "$@" >/dev/null
+          }
+          echo "Running $IMAGE with ${flags[*]} --memory=$MEMORY, PORT=$port and /run/secrets/app.json"
+          if ! start_container "$name"; then
             problem "the container did not start. $hardening Fix: see the error above."; exit 1
           fi
 
@@ -365,6 +385,42 @@ jobs:
               problem "the container exited with code $code before $HEALTH_PATH answered (see the log above). $hardening The app also reads its secrets from /run/secrets/app.json. Fix: make it start under these flags; to test with secrets, commit a fake-values sample and name it in the app-json input."
             fi
           fi
+
+          # Each extra mode runs the same way, with its own command. It passes when its health command
+          # exits 0 and prints the build version, as the default mode's health-path must.
+          i=0
+          for mode in "${modes[@]}"; do
+            i=$((i + 1))
+            mexec="${mode%% | *}" mhealth="${mode#* | }" mname="$name-$i"
+            read -ra mcmd <<< "$mexec"; read -ra mhc <<< "$mhealth"
+            names+=("$mname")
+            echo "Running mode '$mexec' with the same flags; health command: $mhealth"
+            if ! start_container "$mname" "${mcmd[@]}"; then
+              problem "mode '$mexec': the container did not start. $hardening Fix: see the error above, and check the contract-exec command exists in the image."; continue
+            fi
+            ok=0 body="" deadline=$((SECONDS + timeout))
+            while [ "$SECONDS" -lt "$deadline" ]; do
+              [ "$("$engine" inspect -f '{{.State.Status}}' "$mname")" = running ] || break
+              if body="$("$engine" exec "$mname" "${mhc[@]}" 2>&1)"; then ok=1; break; fi
+              sleep 2
+            done
+            if [ "$ok" = 1 ]; then
+              if ! grep -oE '[[:alnum:]._+-]+' <<< "$body" | grep -qxF -- "$VERSION"; then
+                problem "mode '$mexec': the health command '$mhealth' passed but its output did not include the build version $VERSION. Contract: a health check that returns the build version. Fix: make the health command print the VERSION build argument, for example 'ENV VERSION=\$VERSION' in the Containerfile."
+              fi
+            else
+              read -r status code oom <<< "$("$engine" inspect -f '{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}}' "$mname")"
+              logs="$("$engine" logs --tail 40 "$mname" 2>&1 || true)"
+              echo "::group::Last 40 log lines of mode '$mexec'"; printf '%s\n' "$logs"; echo "::endgroup::"
+              if [ "$status" = running ]; then
+                problem "mode '$mexec': the health command '$mhealth' did not exit 0 within ${timeout}s. Contract: a health check that returns the build version. Fix: make the health command succeed once the mode is up, or correct the contract-exec entry. Its last output: $(tail -c 300 <<< "$body" | tr '\n' ' ')"
+              elif [ "$oom" = true ]; then
+                problem "mode '$mexec': ran out of memory under --memory=$MEMORY. $hardening Fix: lower its memory use, or set the memory input to the measured peak of the largest mode plus 25 to 50 percent."
+              else
+                problem "mode '$mexec': the container exited with code $code before its health command passed (see the log above). $hardening Fix: make the mode start and keep running under these flags; the app reads its secrets from /run/secrets/app.json."
+              fi
+            fi
+          done
 
           if [ "$fail" = 0 ]; then
             echo "$IMAGE meets the container contract: $contract"
