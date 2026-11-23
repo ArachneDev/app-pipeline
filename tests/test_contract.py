@@ -30,10 +30,11 @@ def build(context):
     return tag
 
 
-def run_contract(image, context=SAMPLE, app_json="", version=VERSION):
+def run_contract(image, context=SAMPLE, app_json="", version=VERSION, exec_modes=""):
     env = {
         "ENGINE": ENGINE, "IMAGE": image, "VERSION": version, "CONTEXT": str(context),
         "APP_JSON": app_json, "HEALTH_PATH": "/healthz", "MEMORY": "512m", "HEALTH_TIMEOUT": "20",
+        "CONTRACT_EXEC": exec_modes,
     }
     if ENGINE == "podman":
         # Rootless Podman needs its runtime dir; the step runs with a minimal env.
@@ -80,6 +81,12 @@ class Inputs(unittest.TestCase):
         self.assertIn("app-json does not name a file", out)
         self.assertIn("Fix:", out)
 
+    def test_malformed_contract_exec_is_refused(self):
+        for value in ("sleep 300", "sleep 300 | ", " | cat /www/healthz", "ok | fine\nno pipe here"):
+            code, out = self.check(CONTRACT_EXEC=value)
+            self.assertNotEqual(code, 0, value)
+            self.assertIn("contract-exec needs one '<exec> | <health>' per line", out)
+
     def test_empty_hardening_flags_are_refused(self):
         code, out = self.check(RUN_FLAGS="\n")
         self.assertNotEqual(code, 0)
@@ -108,6 +115,44 @@ class ContractTest(unittest.TestCase):
         result = run_contract(self.images["sample"])
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("meets the container contract", result.stdout)
+
+    def test_empty_contract_exec_tests_only_the_default_mode(self):
+        for value in ("", "\n  \n"):
+            result = run_contract(self.images["sample"], exec_modes=value)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn("mode '", result.stdout + result.stderr)
+
+    # The sample is busybox: `sleep` keeps a mode up, and /www/healthz holds the build version.
+    def test_exec_mode_that_is_healthy_with_the_version_passes(self):
+        result = run_contract(self.images["sample"], exec_modes="sleep 300 | cat /www/healthz")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Running mode 'sleep 300'", result.stdout)
+        self.assertIn("meets the container contract", result.stdout)
+
+    def test_each_exec_mode_is_tested_and_one_failure_fails_the_run(self):
+        out = self.assert_fails_with(
+            run_contract(self.images["sample"], exec_modes="sleep 300 | cat /www/healthz\ntrue | cat /www/healthz"),
+            "mode 'true': the container exited with code 0")
+        self.assertNotIn("mode 'sleep 300'", out.split("::error")[-1])
+
+    def test_exec_mode_that_exits_early_fails(self):
+        self.assert_fails_with(run_contract(self.images["sample"], exec_modes="true | cat /www/healthz"),
+                               "mode 'true': the container exited with code 0 before its health command passed",
+                               "Fix: make the mode start and keep running")
+
+    def test_exec_mode_whose_health_never_passes_fails(self):
+        self.assert_fails_with(run_contract(self.images["sample"], exec_modes="sleep 300 | false"),
+                               "mode 'sleep 300': the health command 'false' did not exit 0 within 20s",
+                               "Fix: make the health command succeed")
+
+    def test_exec_mode_healthy_without_the_version_fails(self):
+        self.assert_fails_with(run_contract(self.images["sample"], exec_modes="sleep 300 | echo ok"),
+                               "mode 'sleep 300': the health command 'echo ok' passed but its output did not include the build version",
+                               "Fix: make the health command print the VERSION")
+
+    def test_exec_mode_with_a_missing_command_fails(self):
+        self.assert_fails_with(run_contract(self.images["sample"], exec_modes="no-such-bin | cat /www/healthz"),
+                               "mode 'no-such-bin'")
 
     def test_app_reads_its_sample_secrets_file(self):
         fixture = FIXTURES / "reads-secrets"

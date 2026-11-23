@@ -72,7 +72,7 @@ One promote job runs per app and channel at a time, and a run waiting for approv
 | Build-args check | A `build-args` name looks secret (`TOKEN`, `PASSWORD`, `KEY`...) or gitleaks finds a secret-shaped value |
 | gitleaks on every commit reachable from the build | A secret was ever committed there. A `.gitleaks.toml`, `.gitleaksignore` or `gitleaks:allow` in the app repo is ignored |
 | `docker build` of the `Containerfile` | The build fails. `VERSION` is passed as a build argument, set to the tag |
-| Contract test: runs the image read-only, with no capabilities, `no-new-privileges`, a memory limit, exec tmpfs on `/tmp`, `/var/tmp` and `/run`, `PORT=18080`, `.env.example` as env and a sample `/run/secrets/app.json` | The image's `USER` is not a numeric UID above 0 (a name can map to root), `.env.example` or a README section (Port, Volumes, Dependencies, Memory) is missing, or `health-path` doesn't answer 2xx with the exact version within 60 s. Each error names the contract line and the fix |
+| Contract test: runs the image read-only, with no capabilities, `no-new-privileges`, a memory limit, exec tmpfs on `/tmp`, `/var/tmp` and `/run`, `PORT=18080`, `.env.example` as env and a sample `/run/secrets/app.json` | The image's `USER` is not a numeric UID above 0 (a name can map to root), `.env.example` or a README section (Port, Volumes, Dependencies, Memory) is missing, or `health-path` doesn't answer 2xx with the exact version within 60 s, or a `contract-exec` mode exits early or its health command doesn't pass with the version. Each error names the contract line and the fix |
 | Trivy image scan | A critical CVE with a fix available is not listed in `.trivyignore` |
 | Push to ghcr.io with `GITHUB_TOKEN` | Only on a version tag `vX.Y.Z` (or `vX.Y.Z-pre`), or on a `staging` push with `promote: true`. Any other tag fails. A version tag that already exists fails and is never overwritten. Outputs `image` and `digest` |
 
@@ -90,10 +90,21 @@ All optional. Most apps pass none.
 | `app-json` | Empty: `{}` | Sample `/run/secrets/app.json` for the contract test, inside the context. Fake values only |
 | `health-path` | `/healthz` | Path that must answer 2xx with the build version |
 | `memory` | `512m` | Memory limit for the contract test: the measured peak plus 25 to 50 percent. A number above 0 with a unit: `k`, `m` or `g` |
+| `contract-exec` | Empty: default CMD only | More modes of the same image to contract-test. One per line as `<exec> \| <health>`: the command to run instead of the image's CMD, and the health command to run inside the container (infra's `exec` and `health_cmd`, as plain words with no shell, so a distroless image works). Each mode runs with the same hardening, memory, `.env.example`, `app.json`, `PORT` and 60 s timeout, and passes when its health command exits 0 and prints the exact build version. Example below the table. The default CMD and `health-path` are always tested as before |
 | `promote` | `false` | Move `:prod` and `:staging` as in Release channels |
 | `production-url`, `staging-url` | Empty: no check | Health URL polled after `:prod` or `:staging` moves |
 | `verify-window` | `900` | Seconds to poll: 2 timer intervals (300 s plus up to 30 s delay) plus start-up, rounded up. The first half is one interval plus delay plus 120 s of start-up |
 | `verify-failures` | `3` | Failed polls in a row that move the tag back |
+
+An image that runs in several modes, such as a web CMD and a bot, lists the others in `contract-exec`:
+
+```yaml
+    with:
+      contract-exec: |
+        node apps/bot/dist/main.js | node apps/bot/dist/healthcheck.js
+```
+
+A mode fails with an error naming it when its container exits early, its health command never exits 0 within 60 s, or the command passes without printing the version.
 
 The secrets `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` are optional.
 
